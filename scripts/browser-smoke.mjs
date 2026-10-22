@@ -1,0 +1,38 @@
+import {chromium} from 'playwright';
+import assert from 'node:assert/strict';
+import {mkdtemp} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {spawn} from 'node:child_process';
+const artifacts=await mkdtemp(join(tmpdir(),'pixel-loop-'));
+const child=spawn(process.execPath,['server.js'],{cwd:new URL('..',import.meta.url),env:{...process.env,PORT:'0'},stdio:['ignore','pipe','inherit']});
+const port=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Server startup timeout')),5000);child.on('error',reject);child.stdout.on('data',b=>{const m=b.toString().match(/port (\d+)/);if(m){clearTimeout(timer);resolve(m[1]);}});});
+let browser;
+try{browser=await chromium.launch({...(process.env.CHROMIUM_PATH?{executablePath:process.env.CHROMIUM_PATH}:{}),headless:true,args:['--no-sandbox']});
+
+ const page=await browser.newPage({viewport:{width:1440,height:1100}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(`http://127.0.0.1:${port}`);
+ const fixture=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=c.height=64;const x=c.getContext('2d');x.fillStyle='#123456';x.fillRect(0,0,64,64);return c.toDataURL().split(',')[1];});
+ const png=Buffer.from(fixture,'base64');
+ await page.locator('#upload').setInputFiles({name:'sprite.png',mimeType:'image/png',buffer:png});
+ await page.waitForFunction(()=>document.querySelector('#status').textContent==='Đã tải ảnh.');
+ const pixels=()=>page.evaluate(()=>Array.from(document.querySelector('#output').getContext('2d').getImageData(0,0,64,64).data));
+ const original=await pixels();
+ const bounds=await page.locator('#overlay').boundingBox();const x=bounds.x+bounds.width*.5,y=bounds.y+bounds.height*.5;
+ await page.mouse.click(x,y);const edited=await pixels();assert.notDeepEqual(edited,original);
+ await page.locator('#undo').click();assert.deepEqual(await pixels(),original);
+ await page.locator('#redo').click();assert.deepEqual(await pixels(),edited);
+ const download=page.waitForEvent('download');await page.locator('#save-project').click();const file=await download;await file.saveAs(join(artifacts,'project.json'));
+ await page.locator('#undo').click();await page.locator('#open-project').setInputFiles(join(artifacts,'project.json'));await page.waitForFunction(()=>document.querySelector('#status').textContent==='Đã mở project.');assert.deepEqual(await pixels(),edited);
+ let prompt;
+ await page.route('**/api/**',async route=>{const path=new URL(route.request().url()).pathname;let body={};if(path.endsWith('object_info'))body={CheckpointLoaderSimple:{input:{required:{ckpt_name:[['sd15.safetensors']]}}}};else if(path.endsWith('upload/image'))body={name:'input.png',subfolder:''};else if(path.endsWith('/prompt')){prompt=route.request().postDataJSON().prompt;body={prompt_id:'test-42'};}else if(path.includes('/history/'))body={'test-42':{outputs:{'7':{images:[{filename:'result.png',type:'output',subfolder:''}]}}}};else if(path.endsWith('/view'))return route.fulfill({contentType:'image/png',body:png});await route.fulfill({contentType:'application/json',body:JSON.stringify(body)});});
+ await page.locator('#connect').click();await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Đã kết nối.'));
+ await page.locator('#tool').selectOption('mask');await page.mouse.click(x,y);
+ const before=await pixels();await page.locator('#inpaint').click();await page.locator('#review').waitFor({state:'visible'});assert.equal(prompt['10'].class_type,'LoadImageMask');const preview=await pixels();let changes=0;for(let i=0;i<preview.length;i++)if(preview[i]!==before[i])changes++;assert.ok(changes>0&&changes<=4);
+ await page.locator('#reject').click();assert.deepEqual(await pixels(),before);
+ await page.locator('#inpaint').click();await page.locator('#review').waitFor({state:'visible'});await page.locator('#accept').click();assert.deepEqual(await pixels(),preview);
+ await page.locator('#generate').click();await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Đã tạo ảnh.'));assert.equal(prompt['4'].class_type,'EmptyLatentImage');
+ const output=page.waitForEvent('download');await page.locator('#download').click();await(await output).saveAs(join(artifacts,'output.png'));
+ await page.screenshot({path:join(artifacts,'screenshot.png'),fullPage:true});await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));assert.deepEqual(errors,[]);
+ console.log('Browser PASS: upload, draw, undo/redo, project roundtrip, masked AI preview/reject/accept, PNG download; no JS errors');
+}finally{await browser?.close();child.kill();}

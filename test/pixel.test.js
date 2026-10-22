@@ -1,0 +1,11 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {quantize,workflow} from '../public/pixel.js';
+test('palette cap, hard alpha and transparent RGB',()=>{const input=Uint8ClampedArray.from([255,0,0,255,0,255,0,255,0,0,255,255,200,200,200,100]);const r=quantize(input,2,128);assert.ok(r.palette.length<=2);assert.deepEqual([...r.data.slice(12)],[0,0,0,0]);for(let i=0;i<12;i+=4){assert.equal(r.data[i+3],255);assert.ok(r.palette.some(p=>p.every((v,c)=>v===r.data[i+c])));}});
+test('fully transparent image is valid',()=>{assert.deepEqual(quantize(new Uint8ClampedArray(16),16).palette,[]);});
+test('already pixel colors remain exact when palette fits',()=>{const a=Uint8ClampedArray.from([14,25,36,255,220,100,40,255]);assert.deepEqual(quantize(a,16).data,a);});
+test('LoRA connects model and both text encoders',()=>{const w=workflow({checkpoint:'a.safetensors',lora:'b.safetensors',prompt:'knight',negative:'blur',seed:42});assert.deepEqual(w['5'].inputs.model,['8',0]);assert.deepEqual(w['2'].inputs.clip,['8',1]);assert.deepEqual(w['3'].inputs.clip,['8',1]);assert.equal(w['5'].inputs.seed,42);assert.equal(w['4'].inputs.width,512);});
+import {floodFill,mergeMasked,inpaintWorkflow} from '../public/pixel.js';
+test('flood fill stops at color boundaries',()=>{const d=Uint8ClampedArray.from([1,1,1,255,9,9,9,255,1,1,1,255,9,9,9,255]);floodFill(d,2,2,0,0,[7,8,9,255]);assert.deepEqual([...d],[7,8,9,255,9,9,9,255,7,8,9,255,9,9,9,255]);});
+test('inpainting preserves every unselected byte',()=>{const a=Uint8ClampedArray.from([10,20,30,255,40,50,60,0]),b=Uint8ClampedArray.from([1,2,3,255,4,5,6,255]);assert.deepEqual([...mergeMasked(a,b,new Uint8Array([1,0]))],[1,2,3,255,40,50,60,0]);});
+test('inpaint graph encodes source image and red-channel mask',()=>{const w=inpaintWorkflow({checkpoint:'sd15',prompt:'axe',negative:'blur',seed:2},'source.png','mask.png');assert.equal(w['9'].inputs.image,'source.png');assert.equal(w['10'].inputs.channel,'red');assert.deepEqual(w['5'].inputs.latent_image,['11',0]);assert.equal(w['4'],undefined);});
